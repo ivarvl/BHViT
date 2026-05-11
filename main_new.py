@@ -33,6 +33,12 @@ def get_args_parser():
     )
     parser.add_argument("--batch-size", default=64, type=int)
     parser.add_argument("--epochs", default=300, type=int)
+    parser.add_argument(
+        "--eval-every",
+        default=5,
+        type=int,
+        help="evaluate on the test set every N epochs (also always evaluates on the final epoch)",
+    )
 
     # Model parameters
     parser.add_argument(
@@ -695,36 +701,43 @@ def main(args):
                     checkpoint_dict["model_ema"] = get_state_dict(model_ema)
                 utils.save_on_master(checkpoint_dict, checkpoint_path)
 
-        test_stats = evaluate(data_loader_val, model, device)
-        print(
-            f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+        do_eval = (
+            args.eval_every > 0
+            and ((epoch + 1) % args.eval_every == 0 or epoch == args.epochs - 1)
         )
+        test_stats = None
+        if do_eval:
+            test_stats = evaluate(data_loader_val, model, device)
+            print(
+                f"Accuracy of the network on the {len(dataset_val)} test images: {test_stats['acc1']:.1f}%"
+            )
 
-        if max_accuracy < test_stats["acc1"]:
-            max_accuracy = test_stats["acc1"]
-            if args.output_dir:
-                best_paths = [output_dir / "best.pth"]
-                for best_path in best_paths:
-                    best_dict = {
-                        "model": model_without_ddp.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "lr_scheduler": lr_scheduler.state_dict(),
-                        "epoch": epoch,
-                        "scaler": loss_scaler.state_dict(),
-                        "args": args,
-                    }
-                    if args.model_ema:
-                        best_dict["model_ema"] = get_state_dict(model_ema)
-                    utils.save_on_master(best_dict, best_path)
+            if max_accuracy < test_stats["acc1"]:
+                max_accuracy = test_stats["acc1"]
+                if args.output_dir:
+                    best_paths = [output_dir / "best.pth"]
+                    for best_path in best_paths:
+                        best_dict = {
+                            "model": model_without_ddp.state_dict(),
+                            "optimizer": optimizer.state_dict(),
+                            "lr_scheduler": lr_scheduler.state_dict(),
+                            "epoch": epoch,
+                            "scaler": loss_scaler.state_dict(),
+                            "args": args,
+                        }
+                        if args.model_ema:
+                            best_dict["model_ema"] = get_state_dict(model_ema)
+                        utils.save_on_master(best_dict, best_path)
 
-        print(f"Max accuracy: {max_accuracy:.2f}%")
+            print(f"Max accuracy: {max_accuracy:.2f}%")
 
         if writer is not None:
             for k, v in train_stats.items():
                 writer.add_scalar(f"train/{k}", v, epoch)
-            for k, v in test_stats.items():
-                writer.add_scalar(f"val/{k}", v, epoch)
-            writer.add_scalar("val/best_acc1", max_accuracy, epoch)
+            if test_stats is not None:
+                for k, v in test_stats.items():
+                    writer.add_scalar(f"val/{k}", v, epoch)
+                writer.add_scalar("val/best_acc1", max_accuracy, epoch)
             writer.add_scalar("train/n_parameters", n_parameters, epoch)
 
     if writer is not None:
