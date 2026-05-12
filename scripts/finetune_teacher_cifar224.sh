@@ -19,5 +19,5 @@ python scripts/finetune_teacher.py \
     --cutmix=1.0 \
     --label-smoothing=0.1 \
     --config=configs/deit-tiny-patch16-224-cifar \
-    --output=weights/deit-tiny-cifar10-224.pth \
+    --output=weights/deit-tiny-cifar10-224-new.pth \
     --log-dir=logs/teacher-deit-tiny-cifar10-224

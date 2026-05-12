@@ -7,14 +7,16 @@
 #   - DeiT-Tiny teacher fine-tuned on CIFAR-10 at 224
 #     (run scripts/finetune_teacher_cifar224.sh first).
 #
-# If batch_size=512 OOMs on your GPU, halve --batch-size; the LR is scaled
-# linearly by batch in main_new.py so it stays consistent.
+# LR scaling in main_new.py is Goyal-style: it only scales *up* when the global
+# batch exceeds 512. With a smaller batch we keep --lr=5e-4 as-is (matches the
+# paper's effective LR at batch=512). If you go above 512 (e.g. multi-GPU), the
+# LR will be scaled linearly to maintain consistency.
 
 DATA_DIR=./dataset
 
 torchrun --nproc_per_node=1 --master_port=25641 main_new.py \
     --num-workers=4 \
-    --batch-size=64 \
+    --batch-size=128 \
     --epochs=300 \
     --dropout=0.0 \
     --drop-path=0.1 \
@@ -31,10 +33,10 @@ torchrun --nproc_per_node=1 --master_port=25641 main_new.py \
     --data-path=${DATA_DIR} \
     --data-set=CIFAR \
     --input-size=224 \
-    --output-dir=logs/BHViT-cifar10-224 \
+    --output-dir=logs/BHViT-cifar10-224-lrfix \
     --teacher-model-type=deit \
     --teacher-model=configs/deit-tiny-patch16-224-cifar \
-    --teacher-model-file=weights/deit-tiny-cifar10-224.pth \
+    --teacher-model-file=weights/deit-tiny-cifar10-224-new.pth \
     --model=configs/BHViT_tiny/config.json \
     --model-type=dbhvit \
     --replace-ln-bn \

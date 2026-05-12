@@ -530,8 +530,13 @@ def main(args):
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print("number of params:", n_parameters)
 
-    linear_scaled_lr = args.lr * args.batch_size * utils.get_world_size() / 512.0
-    args.lr = linear_scaled_lr
+    # Goyal-style linear LR scaling: only scale *up* when the global batch
+    # exceeds the paper's reference (512). For smaller batches we keep the
+    # base LR; silently scaling down was hiding a 4x LR shortfall.
+    global_batch = args.batch_size * utils.get_world_size()
+    lr_scale = max(1.0, global_batch / 512.0)
+    args.lr = args.lr * lr_scale
+    print(f"global batch={global_batch}, lr_scale={lr_scale}, effective lr={args.lr}")
     optimizer = create_optimizer(args, model)
     loss_scaler = NativeScaler()
 
@@ -701,9 +706,8 @@ def main(args):
                     checkpoint_dict["model_ema"] = get_state_dict(model_ema)
                 utils.save_on_master(checkpoint_dict, checkpoint_path)
 
-        do_eval = (
-            args.eval_every > 0
-            and ((epoch + 1) % args.eval_every == 0 or epoch == args.epochs - 1)
+        do_eval = args.eval_every > 0 and (
+            (epoch + 1) % args.eval_every == 0 or epoch == args.epochs - 1
         )
         test_stats = None
         if do_eval:
