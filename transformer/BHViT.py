@@ -73,10 +73,12 @@ class BHViTPatchEmbeddings(nn.Module):
     Transformer.
     """
 
-    def __init__(self,config,in_chans=3, out_chans=64):
+    def __init__(self,config,in_chans=3, out_chans=None):
         super().__init__()
+        if out_chans is None:
+            out_chans = config.hidden_size[0]
         self.proj = nn.Conv2d(in_chans, out_chans, kernel_size=4, stride=4)
-        self.norm = config.norm_layer(64, eps=config.layer_norm_eps)
+        self.norm = config.norm_layer(out_chans, eps=config.layer_norm_eps)
         self.act = nn.GELU()
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj(x)
