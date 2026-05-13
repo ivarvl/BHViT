@@ -1,4 +1,4 @@
-"""Fine-tune a DeiT-Tiny ImageNet-pretrained teacher on CIFAR-10 at 224x224.
+"""Fine-tune a DeiT-Tiny ImageNet-pretrained teacher on a downstream dataset at 224x224.
 
 Saves a state_dict compatible with HuggingFace ViTForImageClassification, so
 the BHViT student can load it directly via:
@@ -9,20 +9,21 @@ the BHViT student can load it directly via:
 import argparse
 import math
 import os
+import sys
 import time
 from pathlib import Path
 
 import timm
 import torch
 import torch.nn as nn
-import torchvision
-import torchvision.transforms as T
-from timm.data import Mixup, create_transform
-from timm.data.constants import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from timm.data import Mixup
 from timm.loss import SoftTargetCrossEntropy
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from transformers import ViTConfig, ViTForImageClassification
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from datasets import build_dataset
 
 
 def timm_deit_to_hf_vit(timm_sd, num_layers=12):
@@ -85,32 +86,6 @@ def timm_deit_to_hf_vit(timm_sd, num_layers=12):
     return new
 
 
-def build_loaders(data_path, input_size, batch_size, num_workers):
-    train_tf = create_transform(
-        input_size=input_size,
-        is_training=True,
-        color_jitter=0.4,
-        auto_augment="rand-m9-mstd0.5-inc1",
-        interpolation="bicubic",
-        re_prob=0.25,
-        re_mode="pixel",
-        re_count=1,
-    )
-    val_tf = T.Compose([
-        T.Resize(int(input_size * 256 / 224), interpolation=T.InterpolationMode.BICUBIC),
-        T.CenterCrop(input_size),
-        T.ToTensor(),
-        T.Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD),
-    ])
-    train_ds = torchvision.datasets.CIFAR10(data_path, train=True, download=True, transform=train_tf)
-    val_ds = torchvision.datasets.CIFAR10(data_path, train=False, download=True, transform=val_tf)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=num_workers, pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False,
-                            num_workers=num_workers, pin_memory=True)
-    return train_loader, val_loader
-
-
 @torch.no_grad()
 def evaluate(model, loader, device):
     model.eval()
@@ -128,10 +103,21 @@ def evaluate(model, loader, device):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--data-path", default="./dataset")
+    p.add_argument("--data-set", default="CIFAR",
+                   choices=["CIFAR", "IMNET", "INAT", "INAT19", "PETS"])
+    p.add_argument("--inat-category", default="name",
+                   choices=["kingdom", "phylum", "class", "order",
+                            "supercategory", "family", "genus", "name"])
     p.add_argument("--input-size", type=int, default=224)
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--num-workers", type=int, default=4)
     p.add_argument("--epochs", type=int, default=50)
+    p.add_argument("--color-jitter", type=float, default=0.4)
+    p.add_argument("--aa", type=str, default="rand-m9-mstd0.5-inc1")
+    p.add_argument("--train-interpolation", type=str, default="bicubic")
+    p.add_argument("--reprob", type=float, default=0.25)
+    p.add_argument("--remode", type=str, default="pixel")
+    p.add_argument("--recount", type=int, default=1)
     p.add_argument("--lr", type=float, default=1e-4)
     p.add_argument("--min-lr", type=float, default=1e-6)
     p.add_argument("--warmup-epochs", type=int, default=3)
@@ -152,8 +138,16 @@ def main():
     Path(args.log_dir).mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(args.log_dir)
 
-    # Build HF model from local config (10 classes, ViT-Tiny dims).
+    train_ds, nb_classes = build_dataset(is_train=True, args=args)
+    val_ds, _ = build_dataset(is_train=False, args=args)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,
+                              num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
+                            num_workers=args.num_workers, pin_memory=True)
+
+    # Build HF model from local config; override num_labels to match the dataset.
     cfg = ViTConfig.from_pretrained(args.config)
+    cfg.num_labels = nb_classes
     model = ViTForImageClassification(cfg)
 
     # Load ImageNet-pretrained DeiT-Tiny via timm and remap into HF ViT layout.
@@ -170,14 +164,10 @@ def main():
 
     model.to(device)
 
-    train_loader, val_loader = build_loaders(
-        args.data_path, args.input_size, args.batch_size, args.num_workers
-    )
-
     mixup_fn = Mixup(
         mixup_alpha=args.mixup, cutmix_alpha=args.cutmix,
         prob=1.0, switch_prob=0.5, mode="batch",
-        label_smoothing=args.label_smoothing, num_classes=10,
+        label_smoothing=args.label_smoothing, num_classes=nb_classes,
     ) if args.mixup > 0 or args.cutmix > 0 else None
 
     criterion = SoftTargetCrossEntropy() if mixup_fn is not None else nn.CrossEntropyLoss(

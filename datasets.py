@@ -73,6 +73,11 @@ def build_dataset(is_train, args):
         dataset = INatDataset(args.data_path, train=is_train, year=2019,
                               category=args.inat_category, transform=transform)
         nb_classes = dataset.nb_classes
+    elif args.data_set == 'PETS':
+        split = 'trainval' if is_train else 'test'
+        dataset = datasets.OxfordIIITPet(args.data_path, split=split,
+                                         transform=transform, download=True)
+        nb_classes = 37
 
     return dataset, nb_classes
 
