@@ -13,8 +13,8 @@ DATA_DIR=./dataset
 
 torchrun --nproc_per_node=1 --master_port=25641 main_new.py \
     --num-workers=4 \
-    --batch-size=64 \
-    --epochs=500 \
+    --batch-size=96 \
+    --epochs=250 \
     --dropout=0.0 \
     --drop-path=0.1 \
     --opt=adamw \
@@ -30,11 +30,11 @@ torchrun --nproc_per_node=1 --master_port=25641 main_new.py \
     --data-path=${DATA_DIR} \
     --data-set=PETS \
     --input-size=224 \
-    --output-dir=logs/BHViT-pets-224-500epoch \
+    --output-dir=logs/BHViT-pets-224-inc1 \
     --teacher-model-type=deit \
     --teacher-model=configs/deit-tiny-patch16-224-pets \
     --teacher-model-file=weights/deit-tiny-pets-224.pth \
-    --model=configs/BHViT_tiny/config.json \
+    --model=configs/BHViT_tiny_inc1/config.json \
     --model-type=dbhvit \
     --replace-ln-bn \
     --weight-bits=1 \
