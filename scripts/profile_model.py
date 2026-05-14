@@ -6,10 +6,12 @@ architecture analytically — no PyTorch model is instantiated — and reports:
   * FLOPs   : full-precision multiply-adds in Linear/Conv2d layers
   * BOPs    : binary multiply-adds (XNOR + popcount) in binary layers
   * OPs     : FLOPs + BOPs / 64   (paper convention, Eq. of [ReActNet])
-  * Memory  : binary weights at 1 bit/param, FP weights at 32 bits/param
+  * Memory  : binary weights at 1 bit/param, FP weights at 16 bits/param
+              (matches the BHViT paper's reported model size; the unbinarized
+              stem + classifier head are stored at half precision)
 
 Counting matches the BHViT paper (Tab. 2):
-  - 1 MAC = 1 op (not 2)
+  - 1 MAC = 1 op
   - BOP equivalent = 1/64 FLOP (one XNOR+popcount processes 64 bits)
   - only conv/linear MACs are counted; auxiliary ops (LayerNorm, softmax,
     RPReLU, residual adds, position-embedding adds) are tracked separately
@@ -29,8 +31,8 @@ import argparse
 import json
 from dataclasses import dataclass, field
 
-
 # ---- counters ----------------------------------------------------------------
+
 
 @dataclass
 class Counts:
@@ -40,8 +42,8 @@ class Counts:
     # Auxiliary FLOPs from norms, softmax, activations, residual adds, etc.
     aux_flops: int = 0
     # Weight parameters (Conv/Linear weights).
-    fp_weight_params: int = 0       # FP weights of FP Conv/Linear
-    bin_weight_params: int = 0      # 1-bit weights of binary Conv/Linear
+    fp_weight_params: int = 0  # FP weights of FP Conv/Linear
+    bin_weight_params: int = 0  # 1-bit weights of binary Conv/Linear
     # All other FP params (norms γ/β, biases, position embeddings, RPReLU
     # move/prelu, LayerScale, attention's a1/parm, learnable biases, etc.).
     other_fp_params: int = 0
@@ -62,8 +64,8 @@ class Counts:
 
 
 # Auxiliary cost approximations (ops per element).
-LN_OPS = 8        # mean, var, sub, div, scale, shift
-SOFTMAX_OPS = 4   # max-sub, exp, sum, div
+LN_OPS = 8  # mean, var, sub, div, scale, shift
+SOFTMAX_OPS = 4  # max-sub, exp, sum, div
 RPRELU_OPS = 3
 GELU_OPS = 8
 
@@ -77,6 +79,7 @@ def conv2d_macs(c_in, c_out, k, h_out, w_out, groups=1):
 
 
 # ---- main analytical walk ----------------------------------------------------
+
 
 def profile(cfg, counts):
     img = cfg["image_size"]
@@ -94,7 +97,7 @@ def profile(cfg, counts):
     shift5 = cfg["shift5"]
     disable_layerscale = cfg["disable_layerscale"]
 
-    binary_path = (weight_bits == 1 and input_bits == 1)
+    binary_path = weight_bits == 1 and input_bits == 1
 
     def matmul(macs, label, weights):
         if binary_path:
@@ -107,15 +110,15 @@ def profile(cfg, counts):
             counts.fp_weight_params += weights
 
     s0 = img // patch
-    H_per_stage = [s0 // (2 ** i) for i in range(4)]
+    H_per_stage = [s0 // (2**i) for i in range(4)]
     T_per_stage = [h * h for h in H_per_stage]
 
     # ---- stem (always FP) ----
     C0 = hidden_sizes[0]
     counts.add_fp_macs(conv2d_macs(3, C0, patch, s0, s0), "stem.proj")
     counts.fp_weight_params += 3 * patch * patch * C0
-    counts.other_fp_params += 2 * C0                        # norm γ,β
-    counts.other_fp_params += C0 * T_per_stage[0]           # position embed
+    counts.other_fp_params += 2 * C0  # norm γ,β
+    counts.other_fp_params += C0 * T_per_stage[0]  # position embed
     counts.add_aux(T_per_stage[0] * C0, LN_OPS, "stem.norm")
     counts.add_aux(T_per_stage[0] * C0, GELU_OPS, "stem.gelu")
     counts.add_aux(T_per_stage[0] * C0, 1, "stem.pos_embed_add")
@@ -143,10 +146,10 @@ def profile(cfg, counts):
                 for ci in range(3):
                     macs = conv2d_macs(C, C, 3, H, H, groups=4)
                     w = (C // 4) * 3 * 3 * C
-                    matmul(macs, f"{pfx}.tm.cov{ci+1}", w)
-                    counts.add_aux(T * C, 1, f"{pfx}.tm.cov{ci+1}.bias")
+                    matmul(macs, f"{pfx}.tm.cov{ci + 1}", w)
+                    counts.add_aux(T * C, 1, f"{pfx}.tm.cov{ci + 1}.bias")
                     counts.other_fp_params += C
-                    counts.add_aux(T * C, RPRELU_OPS, f"{pfx}.tm.rprelu{ci+1}")
+                    counts.add_aux(T * C, RPRELU_OPS, f"{pfx}.tm.rprelu{ci + 1}")
                     counts.other_fp_params += 3 * C
                 counts.add_aux(T * C, 2, f"{pfx}.tm.sum")
                 counts.add_aux(T * C, LN_OPS, f"{pfx}.tm.norm")
@@ -168,11 +171,12 @@ def profile(cfg, counts):
                 counts.other_fp_params += 2 * C
 
                 for proj in ("q", "k", "v"):
-                    matmul(linear_macs(C, C, tokens_attn),
-                           f"{pfx}.attn.{proj}", C * C)
+                    matmul(linear_macs(C, C, tokens_attn), f"{pfx}.attn.{proj}", C * C)
                     counts.add_aux(tokens_attn * C, LN_OPS, f"{pfx}.attn.{proj}.ln")
                     counts.other_fp_params += 2 * C
-                    counts.add_aux(tokens_attn * C, RPRELU_OPS, f"{pfx}.attn.{proj}.rprelu")
+                    counts.add_aux(
+                        tokens_attn * C, RPRELU_OPS, f"{pfx}.attn.{proj}.rprelu"
+                    )
                     counts.other_fp_params += 3 * C
                     counts.other_fp_params += 2 * C  # move, move2
 
@@ -186,11 +190,15 @@ def profile(cfg, counts):
                     counts.add_fp_macs(av_macs, f"{pfx}.attn.AV")
 
                 counts.add_aux(Nw * heads * Neff * Neff, 1, f"{pfx}.attn.scale")
-                counts.add_aux(Nw * heads * Neff * Neff, SOFTMAX_OPS, f"{pfx}.attn.softmax")
+                counts.add_aux(
+                    Nw * heads * Neff * Neff, SOFTMAX_OPS, f"{pfx}.attn.softmax"
+                )
                 counts.add_aux(tokens_attn * C, LN_OPS, f"{pfx}.attn.norm_context")
                 counts.other_fp_params += 2 * C
                 counts.add_aux(tokens_attn * C, 3, f"{pfx}.attn.qkv_residual")
-                counts.add_aux(tokens_attn * C, RPRELU_OPS, f"{pfx}.attn.rprelu_context")
+                counts.add_aux(
+                    tokens_attn * C, RPRELU_OPS, f"{pfx}.attn.rprelu_context"
+                )
                 counts.other_fp_params += 3 * C
                 counts.other_fp_params += C  # parm
 
@@ -275,6 +283,7 @@ def profile(cfg, counts):
 
 # ---- pretty print ------------------------------------------------------------
 
+
 def human(n, suffix="OPs"):
     for unit in ("", "K", "M", "G", "T"):
         if abs(n) < 1000:
@@ -298,17 +307,32 @@ def main():
     ap.add_argument("--weight-bits", type=int, default=1)
     ap.add_argument("--input-bits", type=int, default=1)
     ap.add_argument("--image-size", type=int, default=None)
-    ap.add_argument("--some-fp", action="store_true",
-                    help="Keep patch-merge projections at full precision (the † variant)")
+    ap.add_argument(
+        "--some-fp",
+        action="store_true",
+        help="Keep patch-merge projections at full precision (the † variant)",
+    )
     ap.add_argument("--shift3", action="store_true")
     ap.add_argument("--shift5", action="store_true")
     ap.add_argument("--disable-layerscale", action="store_true")
-    ap.add_argument("--bop-divisor", type=int, default=64,
-                    help="BOP-to-FLOP divisor (paper: 64). Use 32 for the "
-                         "stricter convention.")
-    ap.add_argument("--extended", action="store_true",
-                    help="Include LayerNorm/softmax/RPReLU FLOPs and "
-                         "position-embedding params in the totals.")
+    ap.add_argument(
+        "--fp-bytes",
+        type=int,
+        default=2,
+        help="Bytes per FP weight param (paper: 2 = FP16). Use 4 for FP32.",
+    )
+    ap.add_argument(
+        "--bop-divisor",
+        type=int,
+        default=64,
+        help="BOP-to-FLOP divisor (paper: 64). Use 32 for the stricter convention.",
+    )
+    ap.add_argument(
+        "--extended",
+        action="store_true",
+        help="Include LayerNorm/softmax/RPReLU FLOPs and "
+        "position-embedding params in the totals.",
+    )
     ap.add_argument("--show-breakdown", action="store_true")
     args = ap.parse_args()
 
@@ -316,15 +340,17 @@ def main():
         cfg = json.load(f)
     if args.image_size is not None:
         cfg["image_size"] = args.image_size
-    cfg.update({
-        "num_classes": args.num_classes,
-        "weight_bits": args.weight_bits,
-        "input_bits": args.input_bits,
-        "some_fp": args.some_fp,
-        "shift3": args.shift3,
-        "shift5": args.shift5,
-        "disable_layerscale": args.disable_layerscale,
-    })
+    cfg.update(
+        {
+            "num_classes": args.num_classes,
+            "weight_bits": args.weight_bits,
+            "input_bits": args.input_bits,
+            "some_fp": args.some_fp,
+            "shift3": args.shift3,
+            "shift5": args.shift5,
+            "disable_layerscale": args.disable_layerscale,
+        }
+    )
 
     c = Counts()
     profile(cfg, c)
@@ -334,8 +360,8 @@ def main():
     ops_total = flops + bops / args.bop_divisor
 
     bin_weight_bytes = c.bin_weight_params / 8
-    fp_weight_bytes = c.fp_weight_params * 4
-    other_bytes = c.other_fp_params * 4 if args.extended else 0
+    fp_weight_bytes = c.fp_weight_params * args.fp_bytes
+    other_bytes = c.other_fp_params * args.fp_bytes if args.extended else 0
     total_bytes = bin_weight_bytes + fp_weight_bytes + other_bytes
 
     print(f"Config:                {args.config}")
@@ -347,25 +373,30 @@ def main():
     print(f"  weight/input bits    {args.weight_bits}/{args.input_bits}")
     print(f"  some_fp (FDL)        {args.some_fp}")
     print(f"  num_classes          {args.num_classes}")
-    print(f"  counting mode        {'EXTENDED (incl. aux)' if args.extended else 'PAPER (conv/linear MACs only)'}")
+    print(
+        f"  counting mode        {'EXTENDED (incl. aux)' if args.extended else 'PAPER (conv/linear MACs only)'}"
+    )
     print(f"  BOP divisor          1/{args.bop_divisor}")
     print()
     print("Compute (per single inference, batch=1):")
     print(f"  FP MACs (conv/linear)        {human(c.fp_macs)}")
     print(f"  Binary MACs (conv/linear)    {human(c.bin_macs)}")
-    print(f"  Aux FLOPs (norms/softmax/…)  {human(c.aux_flops)}   "
-          f"[{'included' if args.extended else 'NOT included'} in totals]")
+    print(
+        f"  Aux FLOPs (norms/softmax/…)  {human(c.aux_flops)}   "
+        f"[{'included' if args.extended else 'NOT included'} in totals]"
+    )
     print(f"  ---")
     print(f"  FLOPs (reported)             {human(flops)}")
     print(f"  BOPs (reported)              {human(bops)}")
-    print(f"  OPs = FLOPs + BOPs/{args.bop_divisor:<3d}      "
-          f"{human(ops_total)}")
+    print(f"  OPs = FLOPs + BOPs/{args.bop_divisor:<3d}      {human(ops_total)}")
     print()
     print("Parameters:")
     print(f"  Binary weight params         {human(c.bin_weight_params, suffix='')}")
     print(f"  FP weight params             {human(c.fp_weight_params, suffix='')}")
-    print(f"  Other FP params (γ/β/pe/…)   {human(c.other_fp_params, suffix='')}   "
-          f"[{'included' if args.extended else 'NOT included'} in size]")
+    print(
+        f"  Other FP params (γ/β/pe/…)   {human(c.other_fp_params, suffix='')}   "
+        f"[{'included' if args.extended else 'NOT included'} in size]"
+    )
     print()
     print("Memory (parameters, packed):")
     print(f"  Binary weight memory   {human_bytes(bin_weight_bytes)}")
