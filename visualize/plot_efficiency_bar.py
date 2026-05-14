@@ -102,8 +102,9 @@ def main():
 
     widths = discover_widths()
     sizes_mb, ops_mops = [], []
+    some_fp = True
     for d in widths:
-        s, o = profile_width(d, args.num_classes)
+        s, o = profile_width(d, args.num_classes, some_fp=some_fp)
         sizes_mb.append(s)
         ops_mops.append(o)
         print(f"  d={d:<4d}  size={s:6.2f} MB   ops={o:7.2f} MOPs")
@@ -116,6 +117,13 @@ def main():
         args.num_classes,
         wbits=32,
         abits=32,
+        fp_bytes=4,
+    )
+    fp_partial_size, fp_partial_ops = profile_width(
+        fp_d,
+        args.num_classes,
+        wbits=32,
+        abits=1,
         fp_bytes=4,
     )
     print(f"\nFP32 baseline (d={fp_d}):  size={fp_size:.2f} MB   ops={fp_ops:.1f} MOPs")
@@ -133,7 +141,7 @@ def main():
     # In matplotlib barh, the first row plotted goes to y=0 (bottom), so we
     # arrange the data with d=64 first and the FP32 baseline last.
     bin_labels = [str(d) for d in widths]
-    y_labels = bin_labels + [f"FP32\n(d={fp_d})"]
+    y_labels = bin_labels + [f"FP32\n(d={fp_d})"] + [f"Weights-Only FP32\n(d={fp_d})"]
     y_pos = np.arange(len(y_labels))
 
     bin_color = "#2E86AB"
@@ -141,9 +149,9 @@ def main():
     fp_color = "#9B2D20"
     ref_color = "#444444"
 
-    def plot_panel(ax, bin_vals, fp_val, title, xlabel, fmt):
-        colors = [bin_color] * len(bin_vals) + [fp_color]
-        values = list(bin_vals) + [fp_val]
+    def plot_panel(ax, bin_vals, fp_val, fp2_val, title, xlabel, fmt):
+        colors = [bin_color] * len(bin_vals) + [fp_color] * 2
+        values = list(bin_vals) + [fp_val, fp2_val]
         bars = ax.barh(
             y_pos, values, color=colors, edgecolor="white", linewidth=0.8, zorder=3
         )
@@ -162,48 +170,62 @@ def main():
             linestyle="--",
             linewidth=1.4,
             zorder=4,
-            label=f"FP32 baseline: {fmt.format(fp_val)}",
         )
-
-        # color-coded legend handles
-        from matplotlib.lines import Line2D
-        from matplotlib.patches import Patch
-
-        handles = [
-            Patch(facecolor=bin_color, label="binary (w/a=1/1)"),
-            Patch(facecolor=fp_color, label=f"FP32 @ d={fp_d}"),
-            Line2D(
-                [0],
-                [0],
-                color=ref_color,
-                linestyle="--",
-                linewidth=1.4,
-                label="FP32 reference",
-            ),
-        ]
-        ax.legend(handles=handles, loc="lower right", frameon=False, fontsize=9)
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 7.0))
 
     plot_panel(
-        ax1, sizes_mb, fp_size, "Model weight memory", "Weight size (MB)", "{:.2f}"
+        ax1,
+        sizes_mb,
+        fp_size,
+        fp_partial_size,
+        "Model weight memory",
+        "Weight size (MB)",
+        "{:.2f}",
     )
     plot_panel(
         ax2,
         ops_mops,
         fp_ops,
+        fp_partial_ops,
         "Total compute  (FLOPs + BOPs/64)",
         "OPs (MOPs)",
         "{:.1f}",
     )
 
+    # Shared figure-level legend below the panels — avoids overlapping the
+    # FP32 reference line that sits near the right edge of each axes.
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    handles = [
+        Patch(facecolor=bin_color, label="binary (w/a=1/1)"),
+        Patch(facecolor=fp_color, label=f"FP32 @ d={fp_d}"),
+        Line2D(
+            [0],
+            [0],
+            color=ref_color,
+            linestyle="--",
+            linewidth=1.4,
+            label="FP32 reference",
+        ),
+    ]
+    fig.legend(
+        handles=handles,
+        loc="lower center",
+        ncol=3,
+        frameon=False,
+        fontsize=10,
+        bbox_to_anchor=(0.5, -0.005),
+    )
+
     fig.suptitle(
-        f"BHViT width sweep  ·  w/a = 1/1, fully binary, {args.num_classes} classes",
+        f"BHViT | w/a = 1/1, {'some FP16' if some_fp else 'fully binary'}, {args.num_classes} classes",
         fontsize=13,
         fontweight="bold",
         y=1.0,
     )
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    fig.tight_layout(rect=(0, 0.05, 1, 0.96))
 
     png = os.path.join(args.out_dir, "sweep_bars.png")
     pdf = os.path.join(args.out_dir, "sweep_bars.pdf")

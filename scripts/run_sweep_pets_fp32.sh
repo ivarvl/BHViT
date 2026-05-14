@@ -17,11 +17,11 @@ if [ ! -f "$CFG" ]; then
 fi
 
 DATA_DIR=./dataset
-OUT=logs/sweep-pets-fp32-d${D}
+OUT=logs/sweep-pets-fp32-1a-d${D}
 
 torchrun --nproc_per_node=1 --master_port=25641 main_new.py \
     --num-workers=4 \
-    --batch-size=96 \
+    --batch-size=32 \
     --epochs=300 \
     --dropout=0.0 \
     --drop-path=0.1 \
@@ -46,6 +46,6 @@ torchrun --nproc_per_node=1 --master_port=25641 main_new.py \
     --model-type=dbhvit \
     --replace-ln-bn \
     --weight-bits=32 \
-    --input-bits=32 \
+    --input-bits=1 \
     --shift3 \
     --shift5
